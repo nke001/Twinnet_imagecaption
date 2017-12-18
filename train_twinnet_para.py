@@ -119,6 +119,7 @@ def train(opt):
         fc_feats, att_feats, labels, reverse_labels, masks, reverse_masks = tmp
         optimizer.zero_grad()
         # affine_states = s1, s2, s3
+        #import ipdb; ipdb.set_trace()
         out, affine_states = model(fc_feats, att_feats, labels)
         # back_states = s4, s3, s2
         back_out, back_states = back_model(fc_feats, att_feats, reverse_labels)
@@ -136,7 +137,7 @@ def train(opt):
         
         # do affine transform on forward state
         affine_states = affine_states * masks[:, 1:].unsqueeze(2).expand_as(affine_states)
-        invert_backstates = invert_backstates * masks[:, 1:].unsqueeze(2).expand_as(invert_backstates)
+        invert_backstates = invert_backstates * masks[:, :-1].unsqueeze(2).expand_as(invert_backstates)
         
         # affine_states[:, :-1] = s1, s2
         affine_states = affine_states[:, :-1, :]

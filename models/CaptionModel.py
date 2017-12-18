@@ -291,14 +291,21 @@ class CaptionTwinParamModel(nn.Module):
             states.append(state[0].view(state[0].size()[1], state[0].size()[2]))
 
         if self.reverse: 
-            return [torch.cat([_.unsqueeze(1) for _ in outputs], 1).contiguous(), torch.cat([_.unsqueeze(1) for _ in states], 1).contiguous()]
+            #for i, state in enumerate(states):
+            #    state.data.fill_(len(states) - i - 1)
+            return [torch.cat(
+                        [_.unsqueeze(1) for _ in outputs], 1).contiguous(), 
+                    torch.cat(
+                        [_.unsqueeze(1) for _ in states], 1).contiguous()]
         
         else:
-            states =  torch.cat([_.unsqueeze(1) for _ in states], 1).contiguous()
+            states = torch.cat([_.unsqueeze(1) for _ in states], 1).contiguous()
             states_shp = states.size()
             states_reshp = states.view(states_shp[0] * states_shp[1], states_shp[2])
             affine_states = self.ln_hidden(states_reshp)
             affine_states = affine_states.view(states_shp[0], states_shp[1], states_shp[2])   
+            #for i in range(states.size(1)):
+            #    affine_states.data[:, i, :] = i + 1
             return [torch.cat([_.unsqueeze(1) for _ in outputs], 1).contiguous(), affine_states ]
 
 
