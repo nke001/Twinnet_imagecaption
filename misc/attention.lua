@@ -1,5 +1,6 @@
 require 'nn'
 require 'nngraph'
+nngraph.setDebug(true)
 
 local attention = {}
 function attention.attention(input_size, rnn_size, output_size, dropout)
@@ -34,9 +35,9 @@ function attention.attention(input_size, rnn_size, output_size, dropout)
   local hA = nn.Tanh()(nn.CAddTable()({img_all_embed, txt_replicate}))
   if dropout > 0 then hA = nn.Dropout(dropout)(hA) end
   local hAflat = nn.Linear(input_size,1)(nn.View(input_size):setNumInputDims(2)(hA))  
-  local PI = nn.SoftMax()(nn.View(50):setNumInputDims(2)(hAflat))
+  local PI = nn.SoftMax()(nn.View(-1, 50):setNumInputDims(2)(hAflat))
 
-  local probs3dim = nn.View(1,-1):setNumInputDims(1)(PI)
+  local probs3dim = nn.View(1, -1):setNumInputDims(1)(PI)
   local visAtt = nn.MM(false, false)({probs3dim, img_all})
   local visAttdim = nn.View(input_size):setNumInputDims(2)(visAtt)
   local atten_out = nn.CAddTable()({visAttdim, h_out_linear})
@@ -49,6 +50,7 @@ function attention.attention(input_size, rnn_size, output_size, dropout)
   --local logsoft = nn.SoftMax()(proj)
   table.insert(outputs, logsoft)
 
+  nngraph.annotateNodes()
   return nn.gModule(inputs, outputs)
 end
 return attention

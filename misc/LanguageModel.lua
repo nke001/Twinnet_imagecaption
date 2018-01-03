@@ -10,6 +10,7 @@ local img_embedding = require 'misc.img_embedding'
 -------------------------------------------------------------------------------
 -- Language Model core
 -------------------------------------------------------------------------------
+unpack = table.unpack
 
 local layer, parent = torch.class('nn.LanguageModel', 'nn.Module')
 function layer:__init(opt)
@@ -183,7 +184,7 @@ function layer:sample(inputs, opt)
       seqLogprobs[t-1] = sampleLogprobs:view(-1):float() -- and also their log likelihoods
     end
 
-    local inputs = {xt,fc_embed, unpack(state)}
+    local inputs = {xt, fc_embed, table.unpack(state)}
     local out = self.core:forward(inputs)
     state = {}
     for i=1,self.num_state do table.insert(state, out[i]) end
@@ -192,6 +193,8 @@ function layer:sample(inputs, opt)
     local p_out = out[self.num_state+2]
 
     local atten_input = {h_out, p_out, conv_feat, conv_feat_embed}
+    --print('eval')
+    --print(atten_input)
     logprobs = self.attention:forward(atten_input)
 
   end
@@ -345,7 +348,8 @@ function layer:updateOutput(input)
   self.output:resize(self.seq_length+1, batch_size, self.vocab_size+1):zero()
 
   self.img_input = {conv, fc}
-  self.conv_feat, self.conv_feat_embed, self.fc_embed = unpack(self.img_embedding:forward(self.img_input))
+  local embedded = self.img_embedding:forward(self.img_input)
+  self.conv_feat, self.conv_feat_embed, self.fc_embed = unpack(embedded)
 
   self.state = {[0] = self.init_state}
   self.inputs = {}
@@ -354,7 +358,8 @@ function layer:updateOutput(input)
   self.lookup_tables_inputs = {}
   self.tmax = 0 -- we will keep track of max sequence length encountered in the data for efficiency
 
-  for t = 1,self.seq_length+1 do
+  self.all_h = {}
+  for t = 1, self.seq_length+1 do
     local can_skip = false
     local xt
     if t == 1 then
@@ -366,7 +371,7 @@ function layer:updateOutput(input)
       -- feed in the rest of the sequence...
       local it = seq[t-1]:clone()
       if torch.sum(it) == 0 then
-        can_skip = true 
+        can_skip = false
       end
 
       if not can_skip then
@@ -384,10 +389,13 @@ function layer:updateOutput(input)
       self.state[t] = {} -- the rest is state
       for i=1,self.num_state do table.insert(self.state[t], out[i]) end
       local h_out = out[self.num_state+1]
+      self.all_h[t] = h_out:view(1, h_out:size()[1], h_out:size()[2])
       local p_out = out[self.num_state+2]
 
       --forward the attention
       self.atten_inputs[t] = {h_out, p_out, self.conv_feat, self.conv_feat_embed}
+      --print('training')
+      --print(self.atten_inputs[t])
       local atten_out = self.attentions[t]:forward(self.atten_inputs[t])
 
       self.output:narrow(1,t,1):copy(atten_out)
@@ -405,15 +413,20 @@ function layer:updateGradInput(input, gradOutput)
   -- go backwards and lets compute gradients
   local dstate = self.init_state -- this works when init_state is all zeros
 
+  local d_output, d_all_h = table.unpack(gradOutput)
   for t=self.tmax,1,-1 do
 
-    local d_atten = self.attentions[t]:backward(self.atten_inputs[t], gradOutput[t])
+    local d_atten = self.attentions[t]:backward(self.atten_inputs[t], d_output[t])
     if not dconv then dconv = d_atten[3] else dconv:add(d_atten[3]) end
     if not dconv_embed then dconv_embed = d_atten[4] else dconv_embed:add(d_atten[4]) end
 
     local dout = {}
     for k=1, self.num_state do table.insert(dout, dstate[k]) end
-    table.insert(dout, d_atten[1])
+    if d_all_h:size()[1] <= t then
+        table.insert(dout, d_atten[1]) -- d_h_out
+    else
+        table.insert(dout, d_atten[1] + d_all_h[t]) -- d_h_out
+    end
     table.insert(dout, d_atten[2])
 
     local dinputs = self.clones[t]:backward(self.inputs[t], dout)
@@ -450,7 +463,7 @@ function crit:updateOutput(inputs)
   local seq = inputs[2]
   --local seq_len = inputs[3]
 
-  local L,N,Mp1 = input:size(1), input:size(2), input:size(3)
+  local L, N, Mp1 = input:size(1), input:size(2), input:size(3)
   local D = seq:size(1)
   assert(D == L-1, 'input Tensor should be 1 larger in time')
 

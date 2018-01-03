@@ -126,6 +126,7 @@ end
 local protos = {}
 
 protos.lm = nn.LanguageModel(lmOpt):cuda()
+protos.back_lm = nn.LanguageModel(lmOpt):cuda()
 -- initialize the ConvNet 
 if opt.start_from ~= '' then -- just copy to gpu1 params
   protos.cnn_conv_fix = loaded_checkpoint.protos.cnn_conv_fix:cuda()
@@ -148,6 +149,9 @@ protos.expanderFC = nn.FeatExpander(opt.seq_per_img):cuda()
 protos.transform_cnn_conv = net_utils.transform_cnn_conv(opt.conv_size):cuda()
 -- criterion for the language model
 protos.crit = nn.LanguageModelCriterion():cuda()
+protos.back_crit = nn.LanguageModelCriterion():cuda()
+protos.l2_crit = nn.MSECriterion():cuda()
+protos.back_l2_crit = nn.MSECriterion():cuda()
 
 params, grad_params = protos.lm:getParameters()
 cnn1_params, cnn1_grad_params = protos.cnn_conv:getParameters()
@@ -163,6 +167,7 @@ if opt.start_from ~= '' then -- just copy to gpu1 params
 end
 
 protos.lm:createClones()
+protos.back_lm:createClones()
 collectgarbage() 
 
 -------------------------------------------------------------------------------
@@ -237,6 +242,38 @@ local function evaluate_split(split, evalopt)
   return loss_sum/loss_evals, predictions, lang_stats
 end
 
+
+local function revert_2d(x)
+    local seq_len, batch_size = x:size()[1], x:size()[2]
+    x = x:index(1, torch.linspace(seq_len, 1, seq_len):long())
+    return x 
+end
+
+local function revert_3d(x)
+    local seq_len, batch_size, dim = x:size()[1], x:size()[2], x:size()[3]
+    x = x:index(1, torch.linspace(seq_len, 1, seq_len):long())
+    return x 
+end
+
+local function reverse_table(t)
+    local reversedTable = {}
+    local itemCount = #t
+    for k, v in ipairs(t) do
+        reversedTable[itemCount + 1 - k] = v
+    end
+    return reversedTable
+end
+
+function table.slice (args)
+  local sliced = {}
+
+  for i = args.first or 1, args.last or #args.tbl, args.step or 1 do
+    sliced[#sliced+1] = args.tbl[i]
+  end
+
+  return sliced
+end
+
 -------------------------------------------------------------------------------
 -- train function
 -------------------------------------------------------------------------------
@@ -250,6 +287,7 @@ local function Train(epoch)
   protos.cnn_conv:training()
   protos.cnn_fc:training()
   protos.lm:training()
+  protos.back_lm:training()
   protos.cnn_conv_fix:training()
 
   local nbatch = math.ceil(size_image_use / opt.batch_size)
@@ -261,6 +299,7 @@ local function Train(epoch)
   loader:init_rand('train')
   loader:reset_iterator('train')
   for n = 1, nbatch do
+  --for n = 1, 3 do
     xlua.progress(n,nbatch)
     grad_params:zero()
 
@@ -274,7 +313,7 @@ local function Train(epoch)
     data.images = data.images:cuda()
     data.labels = data.labels:cuda()
 
-    local feats_conv_fix =  protos.cnn_conv_fix:forward(data.images)
+    local feats_conv_fix = protos.cnn_conv_fix:forward(data.images)
     local feats_conv = protos.cnn_conv:forward(feats_conv_fix)
     local feat_conv_t = protos.transform_cnn_conv:forward(feats_conv)
 
@@ -284,16 +323,47 @@ local function Train(epoch)
     local expanded_feats_fc = protos.expanderFC:forward(feats_fc)
 
     -- forward the language model
-    local log_prob = protos.lm:forward({expanded_feats_conv, expanded_feats_fc, data.labels})
+    local log_prob = protos.lm:forward(
+        {expanded_feats_conv, expanded_feats_fc, data.labels})
+    -- revert labels for backward
+    local reversed_labels = revert_2d(data.labels)
+    local back_log_prob = protos.back_lm:forward(
+        {expanded_feats_conv, expanded_feats_fc, reversed_labels})
     -- forward the language model criterion
     local loss = protos.crit:forward({log_prob, data.labels})
+    local back_loss = protos.back_crit:forward({back_log_prob, reversed_labels})
+
+    local reversed_back_states = reverse_table(protos.back_lm.all_h)
+    -- forward states
+    local forw_states = protos.lm.all_h
+
+    local forw_states_mat = torch.cat(table.slice{tbl=forw_states, first=2}, 2)[1]
+    local reversed_back_states_mat = torch.cat(table.slice{tbl=reversed_back_states,
+                                                       last=#reversed_back_states - 1}, 2)[1]
+    local l2_loss = protos.l2_crit:forward(forw_states_mat, 
+                                           reversed_back_states_mat)
+    -- the same loss but gradients are compute wrt backward_states
+    local back_l2_loss = protos.back_l2_crit:forward(reversed_back_states_mat,
+                                                     forw_states_mat)
     -----------------------------------------------------------------------------
     -- Backward pass
     -----------------------------------------------------------------------------
     -- backprop criterion
     local d_logprobs = protos.crit:backward({})
+    local back_d_logprobs = protos.back_crit:backward({})
+
+    local d_l2 = protos.l2_crit:backward(forw_states_mat, 
+                                         reversed_back_states_mat)
+    d_l2 = torch.reshape(d_l2, torch.cat(table.slice{tbl=forw_states, first=2}, 1):size())
+    local back_d_l2 = protos.back_l2_crit:backward(reversed_back_states_mat,
+                                                   forw_states_mat)
+    back_d_l2 = torch.reshape(back_d_l2, torch.cat(table.slice{tbl=forw_states, first=2}, 1):size())
+
     -- backprop language model
-    local dexpanded_conv, dexpanded_fc = unpack(protos.lm:backward({}, d_logprobs))
+    local dexpanded_conv, dexpanded_fc = unpack(
+        protos.lm:backward({}, {d_logprobs, d_l2}))
+    local back_dexpanded_conv, back_dexpanded_fc = unpack(
+        protos.back_lm:backward({}, {back_d_logprobs, back_d_l2}))
     
     grad_params:clamp(-opt.grad_clip, opt.grad_clip)
     
