@@ -154,6 +154,7 @@ protos.l2_crit = nn.MSECriterion():cuda()
 protos.back_l2_crit = nn.MSECriterion():cuda()
 
 params, grad_params = protos.lm:getParameters()
+back_params, back_grad_params = protos.back_lm:getParameters()
 cnn1_params, cnn1_grad_params = protos.cnn_conv:getParameters()
 
 print('total number of parameters in LM: ', params:nElement())
@@ -302,6 +303,7 @@ local function Train(epoch)
   --for n = 1, 3 do
     xlua.progress(n,nbatch)
     grad_params:zero()
+    back_grad_params:zero()
 
     -- setting the gradient of the CNN network
     if epoch >= opt.finetune_cnn_after and opt.finetune_cnn_after ~= -1 then
@@ -366,6 +368,7 @@ local function Train(epoch)
         protos.back_lm:backward({}, {back_d_logprobs, back_d_l2}))
     
     grad_params:clamp(-opt.grad_clip, opt.grad_clip)
+    back_grad_params:clamp(-opt.grad_clip, opt.grad_clip)
     
     if epoch >= opt.finetune_cnn_after and opt.finetune_cnn_after ~= -1 then
       net_utils.setBNGradient0(protos.transform_cnn_conv)
@@ -392,8 +395,10 @@ local function Train(epoch)
     -- update the parameters
     if opt.optim == 'rmsprop' then
       rmsprop(params, grad_params, learning_rate, opt.optim_alpha, opt.optim_epsilon, optim_state)
+      rmsprop(back_params, back_grad_params, learning_rate, opt.optim_alpha, opt.optim_epsilon, optim_state)
     elseif opt.optim == 'adam' then
       adam(params, grad_params, learning_rate, opt.optim_alpha, opt.optim_beta, opt.optim_epsilon, optim_state)
+      adam(back_params, back_grad_params, learning_rate, opt.optim_alpha, opt.optim_beta, opt.optim_epsilon, optim_state)
     else
       error('bad option opt.optim')
     end

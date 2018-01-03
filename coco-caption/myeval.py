@@ -10,6 +10,7 @@ from json import encoder
 encoder.FLOAT_REPR = lambda o: format(o, '.3f')
 import sys
 import pdb
+print(sys.argv)
 input_json = sys.argv[1]
 annFile = sys.argv[2]
 
